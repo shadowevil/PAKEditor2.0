@@ -1,3 +1,4 @@
+using Newtonsoft.Json;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Reflection;
@@ -5,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Policy;
 using System.Text;
+using static PAKEditor.Form1;
 using Timer = System.Windows.Forms.Timer;
 
 namespace PAKEditor
@@ -209,10 +211,13 @@ namespace PAKEditor
                 file.DropDownItems.Add("New", null, FileNew_Click);
                 file.DropDownItems.Add("Open", null, FileOpen_Click);
                 file.DropDownItems.Add(new ToolStripSeparator());
+                file.DropDownItems.Add("Import All Sprites", null, Import_All_Sprites);
+                file.DropDownItems.Add("Extract All Sprites", null, Extract_All_Sprites);
                 file.DropDownItems.Add("Remove All Backgrounds", null, FileRemoveAllBackgrounds_Click);
                 file.DropDownItems.Add("Remove All Backgrounds By Color", null, FileRemoveAllBackgroundsByColor_Click);
                 file.DropDownItems.Add(new ToolStripSeparator());
                 file.DropDownItems.Add("Add Sprite", null, FileAddSprite_Click);
+                file.DropDownItems.Add("Add Pak File", null, FileAddPakFile_Click);
                 file.DropDownItems.Add(new ToolStripSeparator());
                 file.DropDownItems.Add("Save As", null, Save_Click);
                 file.DropDownItems.Add(new ToolStripSeparator());
@@ -224,11 +229,285 @@ namespace PAKEditor
 
             ToggleMenuItem(3, false);
             ToggleMenuItem(4, false);
+            ToggleMenuItem(5, false);
             ToggleMenuItem(6, false);
-            ToggleMenuItem(7, false);
+            ToggleMenuItem(8, false);
+            ToggleMenuItem(9, false);
+            ToggleMenuItem(11, false);
 
             this.KeyPreview = true;
             this.KeyDown += Form1_KeyDown;
+        }
+
+        private void FileAddPakFile_Click(object? sender, EventArgs e)
+        {
+            using (OpenFileDialog ofd = new OpenFileDialog())
+            {
+                ofd.Filter = ".PAK Data Files (*.pak)|*.pak";
+
+                if (ofd.ShowDialog() == DialogResult.OK)
+                {
+                    List<Sprite> newSprites = new List<Sprite>();
+                    BitReader reader = new BitReader(ofd.FileName);
+
+                    if (reader.ReadString(17, 8) != "<Pak file header>")
+                        throw new InvalidDataException("Invalid PAK file, no header found!");
+                    reader.SeekBytes(reader.BytePosition + 3);
+                    int SpriteCount = reader.ReadInt32();
+                    for (int i = sprites.Count(); i < SpriteCount + sprites.Count(); i++)
+                    {
+                        newSprites.Add(new Sprite()
+                        {
+                            ID = i
+                        });
+                        SpriteList.Nodes.Add("Sprite " + i);
+                    }
+
+                    for (int i = 0; i < newSprites.Count; i++)
+                    {
+                        newSprites[i].StartBytePosition = reader.ReadUInt32();
+                        newSprites[i].EndBytePosition = reader.ReadUInt32();
+                    }
+
+                    if (reader.ReadString(20, 8) != "<Sprite File Header>")
+                        throw new InvalidDataException("Invalid or corrupt PAK file, no Sprite File Header found!");
+
+                    foreach (var sprite in newSprites)
+                    {
+                        var nodeList = SpriteList.Nodes[sprite.ID];
+                        reader.SeekBytes(sprite.StartBytePosition + 100);
+                        sprite.FrameCount = reader.ReadInt32();
+                        sprite.Rects = new List<SpriteRect>();
+                        for (int i = 0; i < sprite.FrameCount; i++)
+                        {
+                            nodeList.Nodes.Add(nodeList.GetNodeCount(false).ToString());
+                            sprite.Rects.Add(new SpriteRect()
+                            {
+                                x = reader.ReadInt16(),
+                                y = reader.ReadInt16(),
+                                width = reader.ReadInt16(),
+                                height = reader.ReadInt16(),
+                                pivx = reader.ReadInt16(),
+                                pivy = reader.ReadInt16()
+                            });
+                        }
+                        sprite.BitmapStartBytePosition = (uint)(sprite.StartBytePosition + (108 + (12 * sprite.FrameCount)));
+                        reader.SeekBytes(sprite.BitmapStartBytePosition);
+                        sprite.PNGBytes = reader.ReadBytes(sprite.EndBytePosition - (uint)(108 + (12 * sprite.FrameCount))).ToArray();
+
+                        using (Image img = Image.FromStream(new MemoryStream(sprite.PNGBytes)))
+                            sprite.bitmap = new Bitmap(img);
+                    }
+
+                    sprites.AddRange(newSprites);
+                }
+            }
+        }
+
+        private void Import_All_Sprites(object? sender, EventArgs e)
+        {
+            using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+            {
+                if (fbd.ShowDialog() != DialogResult.OK)
+                {
+                    return;
+                }
+
+                string folderPath = fbd.SelectedPath;
+                string newFolderPath = Path.Combine(folderPath + "\\");
+                if (!Directory.Exists(newFolderPath))
+                {
+                    MessageBox.Show("Invalid directory, does not exist!. Unable to Import!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                List<string> SpriteFiles = Directory.GetFiles(newFolderPath)
+                    .Where(x => Path.GetFileName(x).ToLower().StartsWith("sprite ") && Path.GetExtension(x) != ".SpriteRect")
+                    .OrderBy(n => int.Parse(Path.GetFileNameWithoutExtension(n).Substring("Sprite ".Length)))
+                    .ToList();
+
+                if (SpriteFiles.Count <= 0)
+                {
+                    MessageBox.Show("Invalid directory, no files exist. Unable to import!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                if(SpriteFiles.Count() < sprites.Count())
+                {
+                    MessageBox.Show("Invalid directory, file count is off or no files exist with the proper naming scheme. Unable to import!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                bool ShouldImportSpriteRects = false;
+                bool ShouldAddNewSpritesAndRects = false;
+                List<string> SpriteRectFiles = Directory.GetFiles(newFolderPath)
+                    .Where(x => Path.GetFileName(x).ToLower().StartsWith("sprite ") && Path.GetExtension(x) == ".SpriteRect")
+                    .OrderBy(n => int.Parse(Path.GetFileNameWithoutExtension(n).Substring("Sprite ".Length)))
+                    .ToList();
+
+                List<string> addSprites = new List<string>();
+                List<string> addSpriteRects = new List<string>();
+
+                if(SpriteFiles.Count() < SpriteRectFiles.Count() && SpriteRectFiles.Count() > 0)
+                {
+                    MessageBox.Show("Invalid Sprite to SpriteRect count... Unable to Import!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                } else if(SpriteFiles.Count() == SpriteRectFiles.Count())
+                {
+                    ShouldImportSpriteRects = true;
+                    SpriteList.Nodes.Clear();
+
+                    if (SpriteRectFiles.Count() - sprites.Count() > 0)
+                    {
+                        ShouldAddNewSpritesAndRects = true;
+                        addSpriteRects.AddRange(SpriteRectFiles.GetRange(SpriteRectFiles.Count() - sprites.Count(), SpriteRectFiles.Count() - sprites.Count()));
+                        addSprites.AddRange(SpriteFiles.GetRange(SpriteFiles.Count() - sprites.Count(), SpriteFiles.Count() - sprites.Count()));
+                    }
+                }
+
+                for (int i=0;i<sprites.Count(); i++) {
+                    Sprite spr = sprites[i];
+                    if (!File.Exists(newFolderPath + $"Sprite {spr.ID}.png"))
+                    {
+                        MessageBox.Show($"An error has occur'd file does not exists, \'Sprite {spr.ID}.png\'", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    if(ShouldImportSpriteRects)
+                    {
+                        if (!File.Exists(newFolderPath + $"Sprite {spr.ID}.SpriteRect"))
+                        {
+                            MessageBox.Show($"An error has occur'd file does not exists, \'Sprite {spr.ID}.SpriteRect\'", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+                    }
+
+                    spr.bitmap = new Bitmap(Image.FromFile(SpriteFiles[i]));
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        switch (Path.GetExtension(SpriteFiles[i]).ToLower())
+                        {
+                            case ".png":
+                                spr.bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                                spr.PNGBytes = ms.ToArray();
+                                break;
+                            case ".bmp":
+                                spr.bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                                spr.PNGBytes = ms.ToArray();
+                                break;
+                        }
+                        ms.Close();
+                    }
+
+                    if (ShouldImportSpriteRects)
+                    {
+                        SpriteRect[]? rects = JsonConvert.DeserializeObject<SpriteRect[]>(File.ReadAllText(SpriteRectFiles[i]));
+                        if(rects == null)
+                        {
+                            MessageBox.Show($"An error has occur'd unable to import \'Sprite {spr.ID}.SpriteRect\'", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+                        spr.Rects = rects.ToList();
+
+                        SpriteList.Nodes.Add("Sprite " + i);
+                        foreach(SpriteRect rect in rects)
+                        {
+                            SpriteList.Nodes[i].Nodes.Add(SpriteList.Nodes[i].GetNodeCount(false).ToString());
+                        }
+                    }
+                }
+
+                if (ShouldAddNewSpritesAndRects)
+                {
+                    for (int i = 0; i < addSprites.Count(); i++)
+                    {
+                        SpriteRect[]? rects = JsonConvert.DeserializeObject<SpriteRect[]>(File.ReadAllText(addSpriteRects[i]));
+                        if (rects == null)
+                        {
+                            MessageBox.Show($"An error has occur'd unable to import \'Sprite {i}.SpriteRect\'", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+
+                        Sprite spr = new Sprite()
+                        {
+                            ID = sprites.Count() > 0 ? sprites.Select(x => x.ID).Max() + 1 : 0,
+                            Rects = rects.ToList(),
+                            FrameCount = rects.Count(),
+                            PNGBytes = Path.GetExtension(addSprites[i]).ToLower() == ".png" ? File.ReadAllBytes(addSprites[i]) : []
+                        };
+                        spr.bitmap = new Bitmap(Image.FromStream(new MemoryStream(spr.PNGBytes)));
+
+                        sprites.Add(spr);
+
+                        var node = SpriteList.Nodes.Add("Sprite " + spr.ID);
+                        foreach (SpriteRect rect in rects)
+                        {
+                            node.Nodes.Add(node.GetNodeCount(false).ToString());
+                        }
+                    }
+                }
+                PictureView.Refresh();
+            }
+        }
+
+        private void Extract_All_Sprites(object? sender, EventArgs e)
+        {
+            using(FolderBrowserDialog fbd = new FolderBrowserDialog())
+            {
+                if(fbd.ShowDialog() != DialogResult.OK)
+                {
+                    return;
+                }
+
+                string folderPath = fbd.SelectedPath;
+                string newFolderPath = Path.Combine(folderPath + "\\" + Path.GetFileNameWithoutExtension(OpenFileLocation)) + "\\";
+                if (!Directory.Exists(newFolderPath))
+                    Directory.CreateDirectory(newFolderPath);
+
+                List<string> files = Directory.GetFiles(newFolderPath).ToList();
+                if(files.Count > 0)
+                {
+                    MessageBox.Show("Invalid directory, files already exist. Unable to extract!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                bool ShouldExportRects = false;
+                if (MessageBox.Show("Should export Sprite Rectangles?", "Question", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                {
+                    ShouldExportRects = true;
+                }
+
+                int OffsetAmount = 0;
+                if(MessageBox.Show("Should offset file iteration?", "Question", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                {
+                    if (InputDialog.ShowInputDialog("Select Offset", "Input an offset for the files to be saved with") is string offsetStr)
+                    {
+                        if (!int.TryParse(offsetStr, out OffsetAmount))
+                            OffsetAmount = 0;
+                    }
+                }
+
+                foreach(Sprite spr in sprites)
+                {
+                    if(File.Exists(newFolderPath + $"Sprite {spr.ID}.png"))
+                    {
+                        MessageBox.Show($"An error has occur'd file already exists, \'Sprite {spr.ID}.png\'", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    using(MemoryStream ms = new MemoryStream(spr.PNGBytes))
+                    using(Bitmap bmp = new Bitmap(Image.FromStream(ms)))
+                    {
+                        bmp.Save($"{newFolderPath}Sprite {spr.ID + OffsetAmount}.png", ImageFormat.Png);
+                    }
+
+                    if (ShouldExportRects)
+                    {
+                        string rect = JsonConvert.SerializeObject(spr.Rects);
+                        File.WriteAllText($"{newFolderPath}Sprite {spr.ID + OffsetAmount}.SpriteRect", rect);
+                    }
+                }
+            }
         }
 
         private MouseEventHandler? pictureView_RemoveAllByColor_Click = null;
@@ -328,8 +607,41 @@ namespace PAKEditor
 
             if(e.Control && e.KeyCode == Keys.G)
             {
-                IsRemovingBackground = true;
-                removeBackground_Click(SelectedParentNode);
+                if (e.KeyCode == Keys.G)
+                {
+                    IsRemovingBackground = true;
+                    removeBackground_Click(SelectedParentNode);
+                }
+            }
+
+            if (e.Control && e.KeyCode == Keys.Delete)
+            {
+                DeleteByRange();
+            } else if (e.KeyCode == Keys.Delete && SelectedRect == null)
+            {
+                deleteSprite_Click(SelectedParentNode);
+            }
+        }
+
+        private void DeleteByRange()
+        {
+            if(RangeInputDialog.ShowInputDialog("Delete by range", "Select a valid range of sprites") is Range range)
+            {
+                sprites.RemoveRange(range.Start.Value, range.End.Value - range.Start.Value + 1);
+
+                SpriteList.Nodes.Clear();
+
+                for(int i=0;i < sprites.Count;i++)
+                {
+                    sprites[i].ID = i;
+
+                    var node = SpriteList.Nodes.Add($"Sprite {i}");
+
+                    for (int x = 0; x < sprites[i].Rects.Count; x++)
+                    {
+                        node.Nodes.Add(x.ToString());
+                    }
+                }
             }
         }
 
@@ -363,10 +675,14 @@ namespace PAKEditor
         private void FileNew_Click(object? sender, EventArgs e)
         {
             ClearTable();
+
             ToggleMenuItem(3, true);
             ToggleMenuItem(4, true);
+            ToggleMenuItem(5, true);
             ToggleMenuItem(6, true);
-            ToggleMenuItem(7, true);
+            ToggleMenuItem(8, true);
+            ToggleMenuItem(9, true);
+            ToggleMenuItem(11, true);
 
             FileAddSprite_Click(sender, e);
         }
@@ -631,13 +947,25 @@ namespace PAKEditor
 
         private void deleteSprite_Click(int spriteIndex)
         {
-            if (SelectedSprite == null)
-                return;
-            if (SelectedParentNode == -1)
+            if (SelectedSprite == null || SelectedParentNode == -1)
                 return;
 
+            // Suspend the layout to avoid UI updates during modification
+            SpriteList.BeginUpdate();
+
+            // Remove the sprite from both the list and the tree nodes
             SpriteList.Nodes.RemoveAt(spriteIndex);
             sprites.RemoveAt(spriteIndex);
+
+            // Update both the tree node text and sprite ID in one go
+            for (int i = 0; i < SpriteList.Nodes.Count; i++)
+            {
+                SpriteList.Nodes[i].Text = $"Sprite {i}";
+                sprites[i].ID = i;
+            }
+
+            // Resume layout and trigger a single redraw
+            SpriteList.EndUpdate();
         }
 
         private void addRectangle_Click(object? send, int spriteIndex, int v)
@@ -849,8 +1177,11 @@ namespace PAKEditor
             ClearTable();
             ToggleMenuItem(3, true);
             ToggleMenuItem(4, true);
+            ToggleMenuItem(5, true);
             ToggleMenuItem(6, true);
-            ToggleMenuItem(7, true);
+            ToggleMenuItem(8, true);
+            ToggleMenuItem(9, true);
+            ToggleMenuItem(11, true);
 
             BitReader reader = new BitReader(fileName);
 
@@ -932,8 +1263,11 @@ namespace PAKEditor
             SelectedRect = null;
             ToggleMenuItem(3, false);
             ToggleMenuItem(4, false);
+            ToggleMenuItem(5, false);
             ToggleMenuItem(6, false);
-            ToggleMenuItem(7, false);
+            ToggleMenuItem(8, false);
+            ToggleMenuItem(9, false);
+            ToggleMenuItem(11, false);
             PictureView.Refresh();
             GC.Collect();
         }
@@ -989,6 +1323,8 @@ namespace PAKEditor
                 PictureView.MouseClick += pictureView_MouseClickHandler;
 
             PictureView.MouseMove += pictureView_MouseMoveHandler;
+
+            IsRemovingBackground = true;
         }
 
         private void PictureView_MouseMove(object? sender, MouseEventArgs e, int spriteIndex)
